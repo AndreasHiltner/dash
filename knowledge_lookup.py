@@ -27,6 +27,15 @@ STOP_WORDS = {
     "and", "or", "but", "not", "no", "please", "just", "about",
 }
 
+# High-frequency domain words. A single one of these matching only a body is
+# NOT a discriminative signal — "desktop", "tab", "session", "plugin" appear
+# in almost every section, so a lone body hit would surface the wrong answer.
+GENERIC_TERMS = {
+    "plugin", "plugins", "session", "sessions", "desktop", "tab", "tabs",
+    "hermes", "gateway", "command", "commands", "pane", "panes", "dash",
+    "agent", "agents", "window", "windows", "bot", "bots",
+}
+
 
 def _sections(text: str) -> list[str]:
     """Splits into '## Section' chunks, dropping the H1 preamble.
@@ -48,28 +57,53 @@ def _terms(query: str) -> list[str]:
     ]
 
 
-def _score(section_lower: str, terms: list[str]) -> int:
+def _heading_and_body(section: str) -> tuple[str, str]:
+    """A section is '<heading>\n<body>'; split on the first newline.
+
+    Heading matches weight more than body matches: a section NAMED 'Plugins'
+    is a stronger signal than a passing mention of 'plugins' in some body.
+    """
+    heading, _, body = section.partition("\n")
+    return heading, body
+
+
+def _matched(text_lower: str, terms: list[str]) -> set[str]:
     """Word-boundary term hits. Substring matching is a false-positive
     machine: 'das' ⊂ 'dash', 'api' ⊂ 'escaping'. Boundaries require the term
     to stand as its own token (or exact literal like 'ctrl+shift+p')."""
-    return sum(
-        1 for t in terms if re.search(rf"\b{re.escape(t)}\b", section_lower)
-    )
+    return {
+        t for t in terms
+        if re.search(rf"\b{re.escape(t)}\b", text_lower)
+    }
 
 
 def search(query: str) -> str | None:
-    """Returns the most relevant '## section' as text, or None."""
+    """Returns the most relevant '## section' as text, or None.
+
+    Ranking: heading hits first, then body hits. A single generic domain
+    word matching only a body is discarded — it can't distinguish one section
+    from another, so the LLM fallback gets the question instead.
+    """
     terms = _terms(query)
     if not terms:
         return None
-    best, best_score = None, 0
+    best, best_h, best_b = None, -1, -1
+    best_body_matched: set[str] = set()
     for md in sorted(KNOWLEDGE_DIR.glob("*.md")):
         text = md.read_text(encoding="utf-8")
         for section in _sections(text):
-            score = _score(section.lower(), terms)
-            if score > best_score:
-                best, best_score = section, score
-    if best is None or best_score == 0:
+            heading, body = _heading_and_body(section)
+            h_matched = _matched(heading.lower(), terms)
+            b_matched = _matched(body.lower(), terms)
+            key = (len(h_matched), len(b_matched))
+            if key > (best_h, best_b):
+                best_h, best_b = key
+                best = section
+                best_body_matched = b_matched
+    if best is None or best_h + best_b == 0:
+        return None
+    # Lone generic body hit → no real signal → fall through to the LLM.
+    if best_h == 0 and best_b == 1 and next(iter(best_body_matched)) in GENERIC_TERMS:
         return None
     # Restore the '## ' prefix so the answer renders as a heading + body.
     return f"## {best}"

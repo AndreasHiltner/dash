@@ -55,3 +55,19 @@ def test_no_substring_false_positive():
     assert knowledge_lookup.search("das") is None
     hit = knowledge_lookup.search("api gateway")
     assert hit is None or "escaping" not in hit.lower()
+
+
+def test_heading_match_beats_body_match():
+    # 'plugins' matches both the '## Plugins' heading (hermes.md) and a body
+    # mention in desktop.md's '## General'. The heading is the stronger signal
+    # and must win the tie.
+    hit = knowledge_lookup.search("how do I install plugins")
+    assert hit is not None
+    assert hit.startswith("## Plugins")
+
+
+def test_lone_generic_body_hit_does_not_block_llm():
+    # 'plugin'/'session'/'desktop'/'tab' appear in many bodies; a single body
+    # hit is not a discriminative answer and must fall through to the LLM
+    # rather than surface a random section.
+    assert knowledge_lookup.search("desktop") is None
